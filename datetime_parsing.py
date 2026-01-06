@@ -28,6 +28,88 @@ from dataclasses import dataclass
 # - DD Month YYYY (e.g., "15 January 2024")
 
 
+# =============================================================================
+# DATETIME FORMAT DEFINITIONS
+# =============================================================================
+# All supported datetime format patterns. Order matters for pl.coalesce() -
+# more specific formats should come before less specific ones to avoid
+# incorrect matches.
+#
+# TODO(human): Review and organize these formats by priority for your use case.
+# Consider: Which formats are most common in your data? Should ambiguous formats
+# (like US vs European date order) be handled differently?
+
+DATETIME_FORMATS: list[str] = [
+    # --- ISO 8601 with timezone ---
+    "%Y-%m-%dT%H:%M:%S%.f%:z",   # 2024-03-15T14:30:00.123+00:00
+    "%Y-%m-%dT%H:%M:%S%:z",      # 2024-03-15T14:30:00+00:00
+    "%Y-%m-%dT%H:%M:%S%.fZ",     # 2024-03-15T14:30:00.123Z
+    "%Y-%m-%dT%H:%M:%SZ",        # 2024-03-15T14:30:00Z
+
+    # --- ISO 8601 without timezone (treated as UTC) ---
+    "%Y-%m-%dT%H:%M:%S%.f",      # 2024-03-15T14:30:00.123
+    "%Y-%m-%dT%H:%M:%S",         # 2024-03-15T14:30:00
+    "%Y-%m-%dT%H:%M",            # 2024-03-15T14:30
+
+    # --- Space-separated datetime ---
+    "%Y-%m-%d %H:%M:%S%:z",      # 2024-03-15 14:30:00+00:00
+    "%Y-%m-%d %H:%M:%S%.f",      # 2024-03-15 14:30:00.123
+    "%Y-%m-%d %H:%M:%S",         # 2024-03-15 14:30:00
+    "%Y-%m-%d",                  # 2024-03-15
+
+    # --- US format MM/DD/YYYY ---
+    "%m/%d/%Y %H:%M:%S",         # 03/15/2024 14:30:00
+    "%m/%d/%Y %I:%M:%S %p",      # 03/15/2024 02:30:00 PM
+    "%m/%d/%Y %I:%M %p",         # 03/15/2024 2:30 PM
+    "%m/%d/%Y",                  # 03/15/2024
+
+    # --- ISO with slashes ---
+    "%Y/%m/%d %H:%M:%S",         # 2024/03/15 14:30:00
+    "%Y/%m/%d",                  # 2024/03/15
+
+    # --- European DD/MM/YYYY (ambiguous with US!) ---
+    "%d/%m/%Y %H:%M:%S",         # 15/03/2024 14:30:00
+    "%d/%m/%Y",                  # 15/03/2024
+    "%d-%m-%Y %H:%M:%S",         # 15-03-2024 14:30:00
+    "%d-%m-%Y",                  # 15-03-2024
+
+    # --- US with dashes ---
+    "%m-%d-%Y %H:%M:%S",         # 03-15-2024 14:30:00
+    "%m-%d-%Y",                  # 03-15-2024
+
+    # --- Dot separators ---
+    "%Y.%m.%d %H:%M:%S",         # 2024.03.15 14:30:00
+    "%Y.%m.%d",                  # 2024.03.15
+
+    # --- Text month formats ---
+    "%B %d, %Y %H:%M:%S",        # March 15, 2024 14:30:00
+    "%B %d, %Y",                 # March 15, 2024
+    "%d %B %Y %H:%M:%S",         # 15 March 2024 14:30:00
+    "%d %B %Y",                  # 15 March 2024
+    "%b %d, %Y",                 # Mar 15, 2024
+    "%d %b %Y",                  # 15 Mar 2024
+    "%d-%b-%Y %H:%M:%S",         # 15-Mar-2024 14:30:00
+    "%d-%b-%Y",                  # 15-Mar-2024
+
+    # --- Compact formats ---
+    "%Y%m%dT%H%M%SZ",            # 20240315T143000Z
+    "%Y%m%dT%H%M%S%:z",          # 20240315T143000+00:00
+    "%Y%m%d%H%M%S",              # 20240315143000
+    "%Y%m%d",                    # 20240315
+
+    # --- Space with compact timezone ---
+    "%Y-%m-%d %H:%M:%S%z",       # 2024-03-15 14:30:00+0000
+    "%Y-%m-%d %H:%M:%S %z",      # 2024-03-15 14:30:00 +0000
+
+    # --- RFC 2822 (email/HTTP dates) ---
+    "%a, %d %b %Y %H:%M:%S%:z",  # Fri, 15 Mar 2024 14:30:00+00:00
+    "%a, %d %b %Y %H:%M:%S %z",  # Fri, 15 Mar 2024 14:30:00 +0000
+
+    # --- Mixed 12-hour time ---
+    "%Y-%m-%d %I:%M %p",         # 2024-03-15 2:30 PM
+]
+
+
 @dataclass
 class ParseResult:
     """Result of datetime parsing with logging of failures."""
@@ -35,6 +117,34 @@ class ParseResult:
     unparseable: pl.DataFrame
     success_count: int
     failure_count: int
+
+
+def _build_datetime_parsers(
+    column: str,
+    formats: list[str] | None = None,
+) -> list[pl.Expr]:
+    """
+    Build a list of datetime parsing expressions from format strings.
+
+    Args:
+        column: Name of the column to parse
+        formats: List of format strings (defaults to DATETIME_FORMATS)
+
+    Returns:
+        List of Polars expressions for use with pl.coalesce()
+    """
+    if formats is None:
+        formats = DATETIME_FORMATS
+
+    return [
+        pl.col(column).str.to_datetime(
+            format=fmt,
+            strict=False,
+            time_unit="us",
+            time_zone="UTC",
+        )
+        for fmt in formats
+    ]
 
 
 def create_test_dataframe() -> pl.DataFrame:
@@ -126,330 +236,50 @@ def create_test_dataframe() -> pl.DataFrame:
     })
 
 
-def parse_datetimes_multi_format(df: pl.DataFrame, col: str = "datetime_str") -> ParseResult:
+def parse_datetimes_multi_format(
+    df: pl.DataFrame,
+    col: str = "datetime_str",
+    formats: list[str] | None = None,
+) -> ParseResult:
     """
     Parse datetime strings in multiple formats using Polars built-in methods.
 
     Strategy: Use pl.coalesce() to try multiple format patterns, falling back
     through each until one succeeds. Uses strict=False to return null on failure.
 
-    All formats are parsed to naive datetime first, then converted to UTC.
-    Formats with timezone info (%z, %:z, Z suffix) are handled by first stripping
-    or by using the utc=True parameter which automatically converts to UTC.
-
     Args:
         df: DataFrame containing datetime strings
         col: Name of the column containing datetime strings
+        formats: Optional list of format strings (defaults to DATETIME_FORMATS)
 
     Returns:
         ParseResult with parsed DataFrame and logging info
     """
-
     # Preprocess: normalize text-based timezone names to numeric offsets
-    # This handles "UTC", "GMT", "Z" at the end of strings
+    norm_col = "_normalized_dt"
     df = df.with_columns(
         pl.col(col)
         .str.replace(r" UTC$", "+00:00")
         .str.replace(r" GMT$", "+00:00")
         .str.replace(r"Z$", "+00:00")
-        .alias("_normalized_dt")
+        .alias(norm_col)
     )
 
-    # Define parsing attempts in order of likelihood/specificity
-    # Using utc=True for formats with timezone info to convert to UTC immediately
-    # This ensures all results are datetime[μs, UTC] for consistent coalesce
+    # Build parsing expressions from format list and coalesce them
+    parsers = _build_datetime_parsers(norm_col, formats)
+    parsing_expr = pl.coalesce(*parsers).alias("parsed_datetime")
 
-    # Use the normalized column for parsing
-    norm_col = "_normalized_dt"
-
-    parsing_expr = pl.coalesce(
-        # ISO 8601 with timezone - use time_zone="UTC" to normalize to UTC
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M:%S%.f%:z",  # 2024-03-15T14:30:00.123+00:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M:%S%:z",     # 2024-03-15T14:30:00+00:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M:%S%.fZ",    # 2024-03-15T14:30:00.123Z
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M:%SZ",       # 2024-03-15T14:30:00Z
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # ISO without timezone - treat as UTC
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M:%S%.f",     # 2024-03-15T14:30:00.123
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M:%S",        # 2024-03-15T14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%dT%H:%M",           # 2024-03-15T14:30
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Space-separated datetime with timezone offset (normalized from UTC/GMT)
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d %H:%M:%S%:z",     # 2024-03-15 14:30:00+00:00 (from " UTC")
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Space-separated datetime
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d %H:%M:%S%.f",     # 2024-03-15 14:30:00.123
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d %H:%M:%S",        # 2024-03-15 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Date only
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d",                 # 2024-03-15
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # US format MM/DD/YYYY
-        pl.col(norm_col).str.to_datetime(
-            format="%m/%d/%Y %H:%M:%S",        # 03/15/2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%m/%d/%Y %I:%M:%S %p",     # 03/15/2024 02:30:00 PM
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%m/%d/%Y %I:%M %p",        # 03/15/2024 2:30 PM
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%m/%d/%Y",                 # 03/15/2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # ISO with slashes
-        pl.col(norm_col).str.to_datetime(
-            format="%Y/%m/%d %H:%M:%S",        # 2024/03/15 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y/%m/%d",                 # 2024/03/15
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # European DD/MM/YYYY (be careful - ambiguous with US!)
-        pl.col(norm_col).str.to_datetime(
-            format="%d/%m/%Y %H:%M:%S",        # 15/03/2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d/%m/%Y",                 # 15/03/2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d-%m-%Y %H:%M:%S",        # 15-03-2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d-%m-%Y",                 # 15-03-2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # US with dashes
-        pl.col(norm_col).str.to_datetime(
-            format="%m-%d-%Y %H:%M:%S",        # 03-15-2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%m-%d-%Y",                 # 03-15-2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Dot separators
-        pl.col(norm_col).str.to_datetime(
-            format="%Y.%m.%d %H:%M:%S",        # 2024.03.15 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y.%m.%d",                 # 2024.03.15
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Text month formats
-        pl.col(norm_col).str.to_datetime(
-            format="%B %d, %Y %H:%M:%S",       # March 15, 2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%B %d, %Y",                # March 15, 2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d %B %Y %H:%M:%S",        # 15 March 2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d %B %Y",                 # 15 March 2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%b %d, %Y",                # Mar 15, 2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d %b %Y",                 # 15 Mar 2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d-%b-%Y %H:%M:%S",        # 15-Mar-2024 14:30:00
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%d-%b-%Y",                 # 15-Mar-2024
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Compact formats
-        pl.col(norm_col).str.to_datetime(
-            format="%Y%m%dT%H%M%SZ",           # 20240315T143000Z (original)
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y%m%dT%H%M%S%:z",         # 20240315T143000+00:00 (normalized from Z)
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y%m%d%H%M%S",             # 20240315143000
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y%m%d",                   # 20240315
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Space with compact timezone offset (+0000 without colon)
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d %H:%M:%S%z",      # 2024-03-15 14:30:00+0000
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d %H:%M:%S %z",     # 2024-03-15 14:30:00 +0000
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # RFC 2822 format (email/HTTP dates) - with normalized timezone
-        pl.col(norm_col).str.to_datetime(
-            format="%a, %d %b %Y %H:%M:%S%:z", # Fri, 15 Mar 2024 14:30:00+00:00 (from GMT)
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        pl.col(norm_col).str.to_datetime(
-            format="%a, %d %b %Y %H:%M:%S %z", # Fri, 15 Mar 2024 14:30:00 +0000
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-        # Mixed format with 12-hour time (space separated date)
-        pl.col(norm_col).str.to_datetime(
-            format="%Y-%m-%d %I:%M %p",        # 2024-03-15 2:30 PM
-            strict=False,
-            time_unit="us",
-            time_zone="UTC",
-        ),
-    ).alias("parsed_datetime")
-
-    # Apply the parsing
-    result_df = df.with_columns(parsing_expr)
-
-    # Drop the temporary normalized column
-    result_df = result_df.drop("_normalized_dt")
-
-    # The datetime_utc column is now the same as parsed_datetime since we used time_zone="UTC"
-    result_df = result_df.with_columns(
-        pl.col("parsed_datetime").alias("datetime_utc")
+    # Apply parsing and clean up
+    result_df = (
+        df.with_columns(parsing_expr)
+        .drop(norm_col)
+        .with_columns(pl.col("parsed_datetime").alias("datetime_utc"))
     )
 
     # Identify unparseable values
     unparseable_df = result_df.filter(
         pl.col("parsed_datetime").is_null()
-    ).select([
-        "row_id",
-        col,
-    ])
+    ).select(["row_id", col])
 
     success_count = result_df.filter(pl.col("parsed_datetime").is_not_null()).height
     failure_count = result_df.filter(pl.col("parsed_datetime").is_null()).height
